@@ -1,0 +1,56 @@
+From 82e512acbe6128bf7a842227a5d36d9286a87c7a Mon Sep 17 00:00:00 2001
+From: "Jan M. Binder" <jan-git@nlogn.org>
+Date: Sat, 11 Nov 2017 11:58:07 +0100
+Subject: [PATCH 02/14] novena: Innolux N133HSE panel
+
+---
+ drivers/gpu/drm/panel/panel-simple.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/gpu/drm/panel/panel-simple.c b/drivers/gpu/drm/panel/panel-simple.c
+index 474fa759e06e..e2c3d2d100f1 100644
+--- a/drivers/gpu/drm/panel/panel-simple.c
++++ b/drivers/gpu/drm/panel/panel-simple.c
+@@ -1165,6 +1165,29 @@ static const struct panel_desc innolux_n116bge = {
+ 	},
+ };
+ 
++static const struct drm_display_mode innolux_n133hse_ea1_mode = {
++	.clock = 138500,
++	.hdisplay = 1920,
++	.hsync_start = 1920 + 46,
++	.hsync_end = 1920 + 46 + 30,
++	.htotal = 1920 + 160,
++	.vdisplay = 1080,
++	.vsync_start = 1080 + 2,
++	.vsync_end = 1080 + 2 + 4,
++	.vtotal = 1080 + 32,
++	.vrefresh = 60,
++};
++
++static const struct panel_desc innolux_n133hse_ea1 = {
++	.modes = &innolux_n133hse_ea1_mode,
++	.num_modes = 1,
++	.bpc = 8,
++	.size = {
++		.width = 293,
++		.height = 165,
++	},
++};
++
+ static const struct drm_display_mode innolux_n156bge_l21_mode = {
+ 	.clock = 69300,
+ 	.hdisplay = 1366,
+@@ -2031,6 +2054,9 @@ static const struct of_device_id platform_of_match[] = {
+ 	}, {
+ 		.compatible = "innolux,n116bge",
+ 		.data = &innolux_n116bge,
++	}, {
++		.compatible = "innolux,n133hse-ea1",
++		.data = &innolux_n133hse_ea1,
+ 	}, {
+ 		.compatible = "innolux,n156bge-l21",
+ 		.data = &innolux_n156bge_l21,
+-- 
+2.15.1.424.g9478a66081
+

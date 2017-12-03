@@ -1,0 +1,141 @@
+From 51aa0d8159ae80e461eb5b85c758cab102b912fc Mon Sep 17 00:00:00 2001
+From: "Jan M. Binder" <jan-git@nlogn.org>
+Date: Sat, 11 Nov 2017 12:29:21 +0100
+Subject: [PATCH 14/14] novena: package script and builddeb patch
+
+---
+ package-kernel.sh        | 48 ++++++++++++++++++++++++++++++++++++++++++++++++
+ scripts/package/builddeb | 31 ++++++++++++++++++++++++++-----
+ 2 files changed, 74 insertions(+), 5 deletions(-)
+ create mode 100755 package-kernel.sh
+
+diff --git a/package-kernel.sh b/package-kernel.sh
+new file mode 100755
+index 000000000000..b1884ce4ab41
+--- /dev/null
++++ b/package-kernel.sh
+@@ -0,0 +1,48 @@
++#!/bin/sh -e
++# A script to build the kernel .deb files, as used by Kosagi.
++threads=$(($(grep '^processor' /proc/cpuinfo  | cut -d: -f2 | tail -n1)+1))
++version=4.14.0-novena
++
++if git diff-index --name-only HEAD | grep -qv "^scripts/package"; then
++	echo "Repo has local changes.  Stash or commit them."
++	exit 1
++fi
++
++
++echo "Building v${version} with ${threads} threads"
++git tag -d "v${version}" 2> /dev/null || true
++git tag "v${version}"
++
++#make novena_defconfig
++
++make -j${threads} \
++	ARCH=arm \
++	CROSS_COMPILE=arm-linux-gnueabihf- \
++	KBUILD_DEBARCH=armhf \
++	KBUILD_DEBARCH=armhf \
++	KBUILD_IMAGE=arch/arm/boot/zImage \
++	KBUILD_DTB=imx6q-novena.dtb \
++	KBUILD_DESTDIR=usr/share/linux-novena \
++	KDEB_PKGVERSION=${version} \
++	KDEB_PKGNAME="novena" \
++	KDEB_SOURCENAME="linux-image-novena" \
++	EMAIL="jb-novena@nlogn.org" \
++	NAME="J B" \
++	dtbs
++
++# Delete the debian "files" listing, as it tends to be out of date
++rm -f debian/files
++
++make -j${threads} \
++	ARCH=arm \
++	CROSS_COMPILE=arm-linux-gnueabihf- \
++	KBUILD_DEBARCH=armhf \
++	KBUILD_IMAGE=arch/arm/boot/zImage \
++	KBUILD_DTB=imx6q-novena.dtb \
++	KBUILD_DESTDIR=usr/share/linux-novena \
++	KDEB_PKGVERSION=${version} \
++	KDEB_PKGNAME="novena" \
++	KDEB_SOURCENAME="linux-image-novena" \
++	EMAIL="jb-novena@nlogn.org" \
++	NAME="J B" \
++	deb-pkg
+diff --git a/scripts/package/builddeb b/scripts/package/builddeb
+index 0bc87473f68f..35fd249f776e 100755
+--- a/scripts/package/builddeb
++++ b/scripts/package/builddeb
+@@ -107,18 +107,29 @@ if [ "$ARCH" = "um" ] ; then
+ 	packagename=user-mode-linux-$version
+ fi
+ 
++if [ ! -z "${KDEB_PKGNAME}" ]
++then
++	packagename=linux-image-${KDEB_PKGNAME}
++	fwpackagename=linux-firmware-image-${KDEB_PKGNAME}
++	kernel_headers_packagename=linux-headers-${KDEB_PKGNAME}
++fi
++
+ # Not all arches have the same installed path in debian
+ # XXX: have each arch Makefile export a variable of the canonical image install
+ # path instead
+ case $ARCH in
+ um)
+ 	installed_image_path="usr/bin/linux-$version"
++	installed_dtb_path="usr/bin/linux-$version.dtb"
+ 	;;
+ parisc|mips|powerpc)
+ 	installed_image_path="boot/vmlinux-$version"
++	installed_dtb_path="boot/vmlinuz-$version.dtb"
+ 	;;
+ *)
+-	installed_image_path="boot/vmlinuz-$version"
++	# XXX: This is a glorious hack which should be fixed
++	installed_image_path="usr/share/linux-novena/vmlinuz-$version"
++	installed_dtb_path="usr/share/linux-novena/vmlinuz-$version.dtb"
+ esac
+ 
+ BUILD_DEBUG="$(grep -s '^CONFIG_DEBUG_INFO=y' $KCONFIG_CONFIG || true)"
+@@ -129,6 +140,12 @@ mkdir -m 755 -p "$tmpdir/DEBIAN"
+ mkdir -p "$tmpdir/lib" "$tmpdir/boot"
+ mkdir -p "$kernel_headers_dir/lib/modules/$version/"
+ 
++if [ ! -z $KBUILD_DESTDIR ]; then
++	installed_image_path="${KBUILD_DESTDIR}/vmlinuz-$version"
++	installed_dtb_path="${KBUILD_DESTDIR}/vmlinuz-$version.dtb"
++	mkdir -p "${tmpdir}/${KBUILD_DESTDIR}"
++fi
++
+ # Build and install the kernel
+ if [ "$ARCH" = "um" ] ; then
+ 	mkdir -p "$tmpdir/usr/lib/uml/modules/$version" "$tmpdir/usr/bin" "$tmpdir/usr/share/doc/$packagename"
+@@ -136,16 +153,20 @@ if [ "$ARCH" = "um" ] ; then
+ 	cp System.map "$tmpdir/usr/lib/uml/modules/$version/System.map"
+ 	cp $KCONFIG_CONFIG "$tmpdir/usr/share/doc/$packagename/config"
+ 	gzip "$tmpdir/usr/share/doc/$packagename/config"
++elif [ ! -z $KBUILD_DESTDIR ]; then
++	cp System.map "$tmpdir/${KBUILD_DESTDIR}/System.map-$version"
++	cp $KCONFIG_CONFIG "$tmpdir/${KBUILD_DESTDIR}/config-$version"
+ else
+ 	cp System.map "$tmpdir/boot/System.map-$version"
+ 	cp $KCONFIG_CONFIG "$tmpdir/boot/config-$version"
+ fi
+ cp "$($MAKE -s image_name)" "$tmpdir/$installed_image_path"
+ 
+-if grep -q "^CONFIG_OF=y" $KCONFIG_CONFIG ; then
+-	# Only some architectures with OF support have this target
+-	if grep -q dtbs_install "${srctree}/arch/$SRCARCH/Makefile"; then
+-		$MAKE KBUILD_SRC= INSTALL_DTBS_PATH="$tmpdir/usr/lib/$packagename" dtbs_install
++if [ ! -z $KBUILD_DTB ]; then
++	if [ -e $KBUILD_DTB ]; then
++		cp $KBUILD_DTB "$tmpdir/$installed_dtb_path"
++	else
++		cp arch/$ARCH/boot/dts/$KBUILD_DTB "$tmpdir/$installed_dtb_path"
+ 	fi
+ fi
+ 
+-- 
+2.15.1.424.g9478a66081
+

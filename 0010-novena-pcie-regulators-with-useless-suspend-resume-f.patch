@@ -1,0 +1,138 @@
+From d4df1e98f65adeb811c93aad787a5ad9a29c9b1e Mon Sep 17 00:00:00 2001
+From: "Jan M. Binder" <jan-git@nlogn.org>
+Date: Sat, 11 Nov 2017 12:20:57 +0100
+Subject: [PATCH 10/14] novena: pcie regulators with useless suspend/resume
+ functions
+
+---
+ drivers/pci/dwc/pci-imx6.c | 86 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 86 insertions(+)
+
+diff --git a/drivers/pci/dwc/pci-imx6.c b/drivers/pci/dwc/pci-imx6.c
+index b73483534a5b..4c92fd67dfd7 100644
+--- a/drivers/pci/dwc/pci-imx6.c
++++ b/drivers/pci/dwc/pci-imx6.c
+@@ -42,6 +42,8 @@ enum imx6_pcie_variants {
+ 	IMX7D,
+ };
+ 
++static struct dw_pcie *g_pci;
++
+ struct imx6_pcie {
+ 	struct dw_pcie		*pci;
+ 	int			reset_gpio;
+@@ -61,6 +63,8 @@ struct imx6_pcie {
+ 	u32			tx_swing_low;
+ 	int			link_gen;
+ 	struct regulator	*vpcie;
++	struct regulator	*vdd3p3;
++	struct regulator	*vdd1p5;
+ };
+ 
+ /* Parameters for the waiting for PCIe PHY PLL to lock on i.MX7 */
+@@ -700,6 +704,57 @@ static int imx6_add_pcie_port(struct imx6_pcie *imx6_pcie,
+ 	return 0;
+ }
+ 
++static int imx6_pcie_late_suspend(void)
++{
++	struct imx6_pcie *imx6_pcie = to_imx6_pcie(g_pci);
++
++	regmap_update_bits(imx6_pcie->iomuxc_gpr, IOMUXC_GPR1,
++			IMX6Q_GPR1_PCIE_TEST_PD, IMX6Q_GPR1_PCIE_TEST_PD);
++
++	if (imx6_pcie->vdd3p3) {
++		int ret;
++		ret = regulator_disable(imx6_pcie->vdd3p3);
++		if (ret)
++			dev_err(g_pci->dev,
++				"unable to disable 3.3V regulator: %d\n", ret);
++	}
++	if (imx6_pcie->vdd1p5) {
++		int ret;
++		ret = regulator_disable(imx6_pcie->vdd1p5);
++		if (ret)
++			dev_err(g_pci->dev,
++				"unable to disable 1.5V regulator: %d\n", ret);
++	}
++
++	return 0;
++}
++
++static int imx6_pcie_early_resume(void)
++{
++	struct imx6_pcie *imx6_pcie = to_imx6_pcie(g_pci);
++
++	if (imx6_pcie->vdd3p3) {
++		int ret;
++		ret = regulator_enable(imx6_pcie->vdd3p3);
++		if (ret)
++		dev_err(g_pci->dev,
++			"unable to enable 3.3V regulator: %d\n", ret);
++	}
++	if (imx6_pcie->vdd1p5) {
++		int ret;
++		ret = regulator_enable(imx6_pcie->vdd1p5);
++		if (ret)
++		dev_err(g_pci->dev,
++			"unable to enable 1.5V regulator: %d\n", ret);
++	}
++
++	regmap_update_bits(imx6_pcie->iomuxc_gpr, IOMUXC_GPR1,
++			IMX6Q_GPR1_PCIE_TEST_PD, 0);
++
++	return 0;
++}
++
++
+ static const struct dw_pcie_ops dw_pcie_ops = {
+ 	.link_up = imx6_pcie_link_up,
+ };
+@@ -723,6 +778,7 @@ static int imx6_pcie_probe(struct platform_device *pdev)
+ 
+ 	pci->dev = dev;
+ 	pci->ops = &dw_pcie_ops;
++	g_pci = pci;
+ 
+ 	imx6_pcie->pci = pci;
+ 	imx6_pcie->variant =
+@@ -751,6 +807,36 @@ static int imx6_pcie_probe(struct platform_device *pdev)
+ 		return imx6_pcie->reset_gpio;
+ 	}
+ 
++	imx6_pcie->vdd3p3 = devm_regulator_get_optional(&pdev->dev, "vdd3p3");
++	if (IS_ERR(imx6_pcie->vdd3p3)) {
++		ret = PTR_ERR(imx6_pcie->vdd3p3);
++		if (ret == -EPROBE_DEFER)
++			return ret;
++		imx6_pcie->vdd3p3 = NULL;
++	}
++	else {
++		ret = regulator_enable(imx6_pcie->vdd3p3);
++		if (ret) {
++			dev_err(&pdev->dev, "unable to enable regulator: %d\n",
++				ret);
++			return ret;
++		}
++	}
++
++	imx6_pcie->vdd1p5 = devm_regulator_get_optional(&pdev->dev, "vdd1p5");
++	if (IS_ERR(imx6_pcie->vdd1p5)) {
++		ret = PTR_ERR(imx6_pcie->vdd1p5);
++		imx6_pcie->vdd1p5 = NULL;
++	}
++	else {
++		ret = regulator_enable(imx6_pcie->vdd1p5);
++		if (ret) {
++			dev_err(&pdev->dev, "unable to enable regulator: %d\n",
++				ret);
++			return ret;
++		}
++	}
++
+ 	/* Fetch clocks */
+ 	imx6_pcie->pcie_phy = devm_clk_get(dev, "pcie_phy");
+ 	if (IS_ERR(imx6_pcie->pcie_phy)) {
+-- 
+2.15.1.424.g9478a66081
+

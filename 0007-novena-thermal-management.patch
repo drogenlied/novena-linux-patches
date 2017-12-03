@@ -1,0 +1,473 @@
+From 1397fb806c71bcad2c4ce5c2ea1b237d7753856b Mon Sep 17 00:00:00 2001
+From: "Jan M. Binder" <jan-git@nlogn.org>
+Date: Sat, 11 Nov 2017 12:11:43 +0100
+Subject: [PATCH 07/14] novena: thermal management
+
+---
+ arch/arm/boot/dts/imx6q.dtsi    |   4 +
+ arch/arm/boot/dts/imx6qdl.dtsi  |   1 +
+ drivers/cpufreq/imx6q-cpufreq.c |  25 +++++
+ drivers/thermal/imx_thermal.c   | 238 ++++++----------------------------------
+ drivers/thermal/of-thermal.c    |   2 +
+ 5 files changed, 68 insertions(+), 202 deletions(-)
+
+diff --git a/arch/arm/boot/dts/imx6q.dtsi b/arch/arm/boot/dts/imx6q.dtsi
+index 90a741732f60..41cbc23f468c 100644
+--- a/arch/arm/boot/dts/imx6q.dtsi
++++ b/arch/arm/boot/dts/imx6q.dtsi
+@@ -54,6 +54,10 @@
+ 			arm-supply = <&reg_arm>;
+ 			pu-supply = <&reg_pu>;
+ 			soc-supply = <&reg_soc>;
++
++			cooling-min-level = <0>;
++			cooling-max-level = <3>;
++			#cooling-cells = <2>; /* min followed by max */
+ 		};
+ 
+ 		cpu@1 {
+diff --git a/arch/arm/boot/dts/imx6qdl.dtsi b/arch/arm/boot/dts/imx6qdl.dtsi
+index 8884b4a3cafb..84621888e03b 100644
+--- a/arch/arm/boot/dts/imx6qdl.dtsi
++++ b/arch/arm/boot/dts/imx6qdl.dtsi
+@@ -735,6 +735,7 @@
+ 				fsl,tempmon = <&anatop>;
+ 				fsl,tempmon-data = <&ocotp>;
+ 				clocks = <&clks IMX6QDL_CLK_PLL3_USB_OTG>;
++				#thermal-sensor-cells = <1>;
+ 			};
+ 
+ 			usbphy1: usbphy@020c9000 {
+diff --git a/drivers/cpufreq/imx6q-cpufreq.c b/drivers/cpufreq/imx6q-cpufreq.c
+index 14466a9b01c0..72b7a14bdc33 100644
+--- a/drivers/cpufreq/imx6q-cpufreq.c
++++ b/drivers/cpufreq/imx6q-cpufreq.c
+@@ -9,6 +9,7 @@
+ #include <linux/clk.h>
+ #include <linux/cpu.h>
+ #include <linux/cpufreq.h>
++#include <linux/cpu_cooling.h>
+ #include <linux/err.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -35,6 +36,7 @@ static struct clk *pll2_bus_clk;
+ static struct clk *secondary_sel_clk;
+ 
+ static struct device *cpu_dev;
++static struct thermal_cooling_device *cdev;
+ static bool free_opp;
+ static struct cpufreq_frequency_table *freq_table;
+ static unsigned int transition_latency;
+@@ -169,6 +171,28 @@ static int imx6q_set_target(struct cpufreq_policy *policy, unsigned int index)
+ 	return 0;
+ }
+ 
++static void imx6q_cpufreq_ready(struct cpufreq_policy *policy)
++{
++	struct device_node *np = of_node_get(cpu_dev->of_node);
++
++	if (WARN_ON(!np))
++		return;
++
++	if (of_find_property(np, "#cooling-cells", NULL)) {
++		cdev = of_cpufreq_cooling_register(np, policy);
++
++		if (IS_ERR(cdev)) {
++			dev_err(cpu_dev,
++				"running cpufreq without cooling device: %ld\n",
++				PTR_ERR(cdev));
++
++			cdev = NULL;
++		}
++	}
++
++	of_node_put(np);
++}
++
+ static int imx6q_cpufreq_init(struct cpufreq_policy *policy)
+ {
+ 	int ret;
+@@ -186,6 +210,7 @@ static struct cpufreq_driver imx6q_cpufreq_driver = {
+ 	.target_index = imx6q_set_target,
+ 	.get = cpufreq_generic_get,
+ 	.init = imx6q_cpufreq_init,
++	.ready = imx6q_cpufreq_ready,
+ 	.name = "imx6q-cpufreq",
+ 	.attr = cpufreq_generic_attr,
+ 	.suspend = cpufreq_generic_suspend,
+diff --git a/drivers/thermal/imx_thermal.c b/drivers/thermal/imx_thermal.c
+index 4798b4b1fd77..9bea7673dfc8 100644
+--- a/drivers/thermal/imx_thermal.c
++++ b/drivers/thermal/imx_thermal.c
+@@ -66,6 +66,12 @@ enum imx_thermal_trip {
+ 	IMX_TRIP_NUM,
+ };
+ 
++/*
++ * It defines the temperature in millicelsius for passive trip point
++ * that will trigger cooling action when crossed.
++ */
++#define IMX_TEMP_PASSIVE		85000
++
+ #define IMX_POLLING_DELAY		2000 /* millisecond */
+ #define IMX_PASSIVE_DELAY		1000
+ 
+@@ -89,9 +95,8 @@ static struct thermal_soc_data thermal_imx6sx_data = {
+ };
+ 
+ struct imx_thermal_data {
+-	struct cpufreq_policy *policy;
+-	struct thermal_zone_device *tz;
+-	struct thermal_cooling_device *cdev;
++	struct thermal_zone_device *tzof;
++	struct device *dev;
+ 	enum thermal_device_mode mode;
+ 	struct regmap *tempmon;
+ 	u32 c1, c2; /* See formula in imx_get_sensor_data() */
+@@ -132,9 +137,9 @@ static void imx_set_alarm_temp(struct imx_thermal_data *data,
+ 			TEMPSENSE0_ALARM_VALUE_SHIFT);
+ }
+ 
+-static int imx_get_temp(struct thermal_zone_device *tz, int *temp)
++static int imx_get_temp(void *ctx, int *temp)
+ {
+-	struct imx_thermal_data *data = tz->devdata;
++	struct imx_thermal_data *data = ctx;
+ 	struct regmap *map = data->tempmon;
+ 	unsigned int n_meas;
+ 	bool wait;
+@@ -171,7 +176,7 @@ static int imx_get_temp(struct thermal_zone_device *tz, int *temp)
+ 	}
+ 
+ 	if ((val & TEMPSENSE0_FINISHED) == 0) {
+-		dev_dbg(&tz->device, "temp measurement never finished\n");
++		dev_dbg(data->dev, "temp measurement never finished\n");
+ 		return -EAGAIN;
+ 	}
+ 
+@@ -188,13 +193,13 @@ static int imx_get_temp(struct thermal_zone_device *tz, int *temp)
+ 		if (data->alarm_temp == data->temp_critical &&
+ 			*temp < data->temp_passive) {
+ 			imx_set_alarm_temp(data, data->temp_passive);
+-			dev_dbg(&tz->device, "thermal alarm off: T < %d\n",
++			dev_dbg(data->dev, "thermal alarm off: T < %d\n",
+ 				data->alarm_temp / 1000);
+ 		}
+ 	}
+ 
+ 	if (*temp != data->last_temp) {
+-		dev_dbg(&tz->device, "millicelsius: %d\n", *temp);
++		dev_dbg(data->dev, "millicelsius: %d\n", *temp);
+ 		data->last_temp = *temp;
+ 	}
+ 
+@@ -207,143 +212,8 @@ static int imx_get_temp(struct thermal_zone_device *tz, int *temp)
+ 	return 0;
+ }
+ 
+-static int imx_get_mode(struct thermal_zone_device *tz,
+-			enum thermal_device_mode *mode)
+-{
+-	struct imx_thermal_data *data = tz->devdata;
+-
+-	*mode = data->mode;
+-
+-	return 0;
+-}
+-
+-static int imx_set_mode(struct thermal_zone_device *tz,
+-			enum thermal_device_mode mode)
+-{
+-	struct imx_thermal_data *data = tz->devdata;
+-	struct regmap *map = data->tempmon;
+-
+-	if (mode == THERMAL_DEVICE_ENABLED) {
+-		tz->polling_delay = IMX_POLLING_DELAY;
+-		tz->passive_delay = IMX_PASSIVE_DELAY;
+-
+-		regmap_write(map, TEMPSENSE0 + REG_CLR, TEMPSENSE0_POWER_DOWN);
+-		regmap_write(map, TEMPSENSE0 + REG_SET, TEMPSENSE0_MEASURE_TEMP);
+-
+-		if (!data->irq_enabled) {
+-			data->irq_enabled = true;
+-			enable_irq(data->irq);
+-		}
+-	} else {
+-		regmap_write(map, TEMPSENSE0 + REG_CLR, TEMPSENSE0_MEASURE_TEMP);
+-		regmap_write(map, TEMPSENSE0 + REG_SET, TEMPSENSE0_POWER_DOWN);
+-
+-		tz->polling_delay = 0;
+-		tz->passive_delay = 0;
+-
+-		if (data->irq_enabled) {
+-			disable_irq(data->irq);
+-			data->irq_enabled = false;
+-		}
+-	}
+-
+-	data->mode = mode;
+-	thermal_zone_device_update(tz, THERMAL_EVENT_UNSPECIFIED);
+-
+-	return 0;
+-}
+-
+-static int imx_get_trip_type(struct thermal_zone_device *tz, int trip,
+-			     enum thermal_trip_type *type)
+-{
+-	*type = (trip == IMX_TRIP_PASSIVE) ? THERMAL_TRIP_PASSIVE :
+-					     THERMAL_TRIP_CRITICAL;
+-	return 0;
+-}
+-
+-static int imx_get_crit_temp(struct thermal_zone_device *tz, int *temp)
+-{
+-	struct imx_thermal_data *data = tz->devdata;
+-
+-	*temp = data->temp_critical;
+-	return 0;
+-}
+-
+-static int imx_get_trip_temp(struct thermal_zone_device *tz, int trip,
+-			     int *temp)
+-{
+-	struct imx_thermal_data *data = tz->devdata;
+-
+-	*temp = (trip == IMX_TRIP_PASSIVE) ? data->temp_passive :
+-					     data->temp_critical;
+-	return 0;
+-}
+-
+-static int imx_set_trip_temp(struct thermal_zone_device *tz, int trip,
+-			     int temp)
+-{
+-	struct imx_thermal_data *data = tz->devdata;
+-
+-	/* do not allow changing critical threshold */
+-	if (trip == IMX_TRIP_CRITICAL)
+-		return -EPERM;
+-
+-	/* do not allow passive to be set higher than critical */
+-	if (temp < 0 || temp > data->temp_critical)
+-		return -EINVAL;
+-
+-	data->temp_passive = temp;
+-
+-	imx_set_alarm_temp(data, temp);
+-
+-	return 0;
+-}
+-
+-static int imx_bind(struct thermal_zone_device *tz,
+-		    struct thermal_cooling_device *cdev)
+-{
+-	int ret;
+-
+-	ret = thermal_zone_bind_cooling_device(tz, IMX_TRIP_PASSIVE, cdev,
+-					       THERMAL_NO_LIMIT,
+-					       THERMAL_NO_LIMIT,
+-					       THERMAL_WEIGHT_DEFAULT);
+-	if (ret) {
+-		dev_err(&tz->device,
+-			"binding zone %s with cdev %s failed:%d\n",
+-			tz->type, cdev->type, ret);
+-		return ret;
+-	}
+-
+-	return 0;
+-}
+-
+-static int imx_unbind(struct thermal_zone_device *tz,
+-		      struct thermal_cooling_device *cdev)
+-{
+-	int ret;
+-
+-	ret = thermal_zone_unbind_cooling_device(tz, IMX_TRIP_PASSIVE, cdev);
+-	if (ret) {
+-		dev_err(&tz->device,
+-			"unbinding zone %s with cdev %s failed:%d\n",
+-			tz->type, cdev->type, ret);
+-		return ret;
+-	}
+-
+-	return 0;
+-}
+-
+-static struct thermal_zone_device_ops imx_tz_ops = {
+-	.bind = imx_bind,
+-	.unbind = imx_unbind,
++static const struct thermal_zone_of_device_ops imx_of_thermal_ops = {
+ 	.get_temp = imx_get_temp,
+-	.get_mode = imx_get_mode,
+-	.set_mode = imx_set_mode,
+-	.get_trip_type = imx_get_trip_type,
+-	.get_trip_temp = imx_get_trip_temp,
+-	.get_crit_temp = imx_get_crit_temp,
+-	.set_trip_temp = imx_set_trip_temp,
+ };
+ 
+ static int imx_get_sensor_data(struct platform_device *pdev)
+@@ -456,10 +326,10 @@ static irqreturn_t imx_thermal_alarm_irq_thread(int irq, void *dev)
+ {
+ 	struct imx_thermal_data *data = dev;
+ 
+-	dev_dbg(&data->tz->device, "THERMAL ALARM: T > %d\n",
++	dev_dbg(&data->tzof->device, "THERMAL ALARM: T > %d\n",
+ 		data->alarm_temp / 1000);
+ 
+-	thermal_zone_device_update(data->tz, THERMAL_EVENT_UNSPECIFIED);
++	thermal_zone_device_update(data->tzof, THERMAL_TRIP_VIOLATED);
+ 
+ 	return IRQ_HANDLED;
+ }
+@@ -482,6 +352,8 @@ static int imx_thermal_probe(struct platform_device *pdev)
+ 	if (!data)
+ 		return -ENOMEM;
+ 
++	data->dev = &pdev->dev;
++
+ 	map = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "fsl,tempmon");
+ 	if (IS_ERR(map)) {
+ 		ret = PTR_ERR(map);
+@@ -512,7 +384,16 @@ static int imx_thermal_probe(struct platform_device *pdev)
+ 	if (data->irq < 0)
+ 		return data->irq;
+ 
++	ret = devm_request_threaded_irq(&pdev->dev, data->irq,
++			imx_thermal_alarm_irq, imx_thermal_alarm_irq_thread,
++			0, "imx_thermal", data);
++	if (ret < 0) {
++		dev_err(&pdev->dev, "failed to request alarm irq: %d\n", ret);
++		return ret;
++	}
++
+ 	platform_set_drvdata(pdev, data);
++	dev_set_drvdata(&pdev->dev, data);
+ 
+ 	ret = imx_get_sensor_data(pdev);
+ 	if (ret) {
+@@ -527,29 +408,12 @@ static int imx_thermal_probe(struct platform_device *pdev)
+ 	regmap_write(map, MISC0 + REG_SET, MISC0_REFTOP_SELBIASOFF);
+ 	regmap_write(map, TEMPSENSE0 + REG_SET, TEMPSENSE0_POWER_DOWN);
+ 
+-	data->policy = cpufreq_cpu_get(0);
+-	if (!data->policy) {
+-		pr_debug("%s: CPUFreq policy not found\n", __func__);
+-		return -EPROBE_DEFER;
+-	}
+-
+-	data->cdev = cpufreq_cooling_register(data->policy);
+-	if (IS_ERR(data->cdev)) {
+-		ret = PTR_ERR(data->cdev);
+-		dev_err(&pdev->dev,
+-			"failed to register cpufreq cooling device: %d\n", ret);
+-		cpufreq_cpu_put(data->policy);
+-		return ret;
+-	}
+-
+ 	data->thermal_clk = devm_clk_get(&pdev->dev, NULL);
+ 	if (IS_ERR(data->thermal_clk)) {
+ 		ret = PTR_ERR(data->thermal_clk);
+ 		if (ret != -EPROBE_DEFER)
+ 			dev_err(&pdev->dev,
+ 				"failed to get thermal clk: %d\n", ret);
+-		cpufreq_cooling_unregister(data->cdev);
+-		cpufreq_cpu_put(data->policy);
+ 		return ret;
+ 	}
+ 
+@@ -563,32 +427,9 @@ static int imx_thermal_probe(struct platform_device *pdev)
+ 	ret = clk_prepare_enable(data->thermal_clk);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "failed to enable thermal clk: %d\n", ret);
+-		cpufreq_cooling_unregister(data->cdev);
+-		cpufreq_cpu_put(data->policy);
+-		return ret;
+-	}
+-
+-	data->tz = thermal_zone_device_register("imx_thermal_zone",
+-						IMX_TRIP_NUM,
+-						BIT(IMX_TRIP_PASSIVE), data,
+-						&imx_tz_ops, NULL,
+-						IMX_PASSIVE_DELAY,
+-						IMX_POLLING_DELAY);
+-	if (IS_ERR(data->tz)) {
+-		ret = PTR_ERR(data->tz);
+-		dev_err(&pdev->dev,
+-			"failed to register thermal zone device %d\n", ret);
+-		clk_disable_unprepare(data->thermal_clk);
+-		cpufreq_cooling_unregister(data->cdev);
+-		cpufreq_cpu_put(data->policy);
+ 		return ret;
+ 	}
+ 
+-	dev_info(&pdev->dev, "%s CPU temperature grade - max:%dC"
+-		 " critical:%dC passive:%dC\n", data->temp_grade,
+-		 data->temp_max / 1000, data->temp_critical / 1000,
+-		 data->temp_passive / 1000);
+-
+ 	/* Enable measurements at ~ 10 Hz */
+ 	regmap_write(map, TEMPSENSE1 + REG_CLR, TEMPSENSE1_MEASURE_FREQ);
+ 	measure_freq = DIV_ROUND_UP(32768, 10); /* 10 Hz */
+@@ -601,21 +442,16 @@ static int imx_thermal_probe(struct platform_device *pdev)
+ 	regmap_write(map, TEMPSENSE0 + REG_CLR, TEMPSENSE0_POWER_DOWN);
+ 	regmap_write(map, TEMPSENSE0 + REG_SET, TEMPSENSE0_MEASURE_TEMP);
+ 
+-	ret = devm_request_threaded_irq(&pdev->dev, data->irq,
+-			imx_thermal_alarm_irq, imx_thermal_alarm_irq_thread,
+-			0, "imx_thermal", data);
+-	if (ret < 0) {
+-		dev_err(&pdev->dev, "failed to request alarm irq: %d\n", ret);
+-		clk_disable_unprepare(data->thermal_clk);
+-		thermal_zone_device_unregister(data->tz);
+-		cpufreq_cooling_unregister(data->cdev);
+-		cpufreq_cpu_put(data->policy);
+-		return ret;
+-	}
+-
+ 	data->irq_enabled = true;
+ 	data->mode = THERMAL_DEVICE_ENABLED;
+ 
++	data->tzof = thermal_zone_of_sensor_register(&pdev->dev, 0,
++						     data,
++						     &imx_of_thermal_ops);
++	if (IS_ERR(data->tzof))
++		data->tzof = NULL;
++
++
+ 	return 0;
+ }
+ 
+@@ -624,15 +460,13 @@ static int imx_thermal_remove(struct platform_device *pdev)
+ 	struct imx_thermal_data *data = platform_get_drvdata(pdev);
+ 	struct regmap *map = data->tempmon;
+ 
++	thermal_zone_of_sensor_unregister(&pdev->dev, data->tzof);
++
+ 	/* Disable measurements */
+ 	regmap_write(map, TEMPSENSE0 + REG_SET, TEMPSENSE0_POWER_DOWN);
+ 	if (!IS_ERR(data->thermal_clk))
+ 		clk_disable_unprepare(data->thermal_clk);
+ 
+-	thermal_zone_device_unregister(data->tz);
+-	cpufreq_cooling_unregister(data->cdev);
+-	cpufreq_cpu_put(data->policy);
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/thermal/of-thermal.c b/drivers/thermal/of-thermal.c
+index d04ec3b9e5ff..b92b7e88f90d 100644
+--- a/drivers/thermal/of-thermal.c
++++ b/drivers/thermal/of-thermal.c
+@@ -996,6 +996,8 @@ int __init of_parse_thermal_zones(void)
+ 
+ 		/* No hwmon because there might be hwmon drivers registering */
+ 		tzp->no_hwmon = true;
++		if (of_property_read_bool(child, "hwmon"))
++			tzp->no_hwmon = false;
+ 
+ 		if (!of_property_read_u32(child, "sustainable-power", &prop))
+ 			tzp->sustainable_power = prop;
+-- 
+2.15.1.424.g9478a66081
+

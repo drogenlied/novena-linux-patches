@@ -1,0 +1,63 @@
+From 9b94c0029718bed5a3fc6b6bcef804986c46bcd7 Mon Sep 17 00:00:00 2001
+From: "Jan M. Binder" <jan-git@nlogn.org>
+Date: Sat, 11 Nov 2017 12:07:37 +0100
+Subject: [PATCH 06/14] novena: sound fixes
+
+---
+ sound/soc/codecs/es8328.c | 12 ++++++++++--
+ sound/soc/soc-jack.c      |  2 +-
+ 2 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/sound/soc/codecs/es8328.c b/sound/soc/codecs/es8328.c
+index bcdb8914ec16..ee7f607d549c 100644
+--- a/sound/soc/codecs/es8328.c
++++ b/sound/soc/codecs/es8328.c
+@@ -474,6 +474,9 @@ static int es8328_startup(struct snd_pcm_substream *substream,
+ 	return 0;
+ }
+ 
++static int es8328_set_sysclk(struct snd_soc_dai *codec_dai,
++		int clk_id, unsigned int freq, int dir);
++
+ static int es8328_hw_params(struct snd_pcm_substream *substream,
+ 	struct snd_pcm_hw_params *params,
+ 	struct snd_soc_dai *dai)
+@@ -484,6 +487,7 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
+ 	int reg;
+ 	int wl;
+ 	int ratio;
++	int clk_rate;
+ 
+ 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+ 		reg = ES8328_DACCONTROL2;
+@@ -492,8 +496,12 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
+ 
+ 	if (es8328->master) {
+ 		if (!es8328->sysclk_constraints) {
+-			dev_err(codec->dev, "No MCLK configured\n");
+-			return -EINVAL;
++			clk_rate = clk_get_rate(es8328->clk);
++			es8328_set_sysclk(dai, ES8328_SYSCLK, clk_rate, 0);
++			if (!es8328->sysclk_constraints) {
++				dev_err(codec->dev, "No MCLK configured\n");
++				return -EINVAL;
++			}
+ 		}
+ 
+ 		for (i = 0; i < es8328->sysclk_constraints->count; i++)
+diff --git a/sound/soc/soc-jack.c b/sound/soc/soc-jack.c
+index 99902ae1a2d9..23983a42f015 100644
+--- a/sound/soc/soc-jack.c
++++ b/sound/soc/soc-jack.c
+@@ -95,7 +95,7 @@ int snd_soc_card_jack_new(struct snd_soc_card *card, const char *id, int type,
+ 	INIT_LIST_HEAD(&jack->jack_zones);
+ 	BLOCKING_INIT_NOTIFIER_HEAD(&jack->notifier);
+ 
+-	ret = snd_jack_new(card->snd_card, id, type, &jack->jack, false, false);
++	ret = snd_jack_new(card->snd_card, id, type, &jack->jack, true, false);
+ 	if (ret)
+ 		return ret;
+ 
+-- 
+2.15.1.424.g9478a66081
+

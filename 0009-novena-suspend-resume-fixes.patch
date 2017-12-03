@@ -1,0 +1,102 @@
+From 9e18b7e41e4462467a0c06fb0e5800805148a8f6 Mon Sep 17 00:00:00 2001
+From: "Jan M. Binder" <jan-git@nlogn.org>
+Date: Sat, 11 Nov 2017 12:18:29 +0100
+Subject: [PATCH 09/14] novena: suspend/resume fixes
+
+---
+ arch/arm/mach-imx/pm-imx6.c | 31 +++++++++++++++++++++++++++++++
+ drivers/tty/serial/imx.c    |  8 ++++----
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/mach-imx/pm-imx6.c b/arch/arm/mach-imx/pm-imx6.c
+index ecdf071653d4..8668866c5621 100644
+--- a/arch/arm/mach-imx/pm-imx6.c
++++ b/arch/arm/mach-imx/pm-imx6.c
+@@ -366,6 +366,8 @@ static int imx6q_suspend_finish(unsigned long val)
+ 
+ static int imx6q_pm_enter(suspend_state_t state)
+ {
++	struct regmap *g;
++
+ 	switch (state) {
+ 	case PM_SUSPEND_STANDBY:
+ 		imx6_set_lpm(STOP_POWER_ON);
+@@ -392,10 +394,39 @@ static int imx6q_pm_enter(suspend_state_t state)
+ 			imx6_enable_rbc(true);
+ 		imx_gpc_pre_suspend(true);
+ 		imx_anatop_pre_suspend();
++
++		/*
++		 * L2 can exit by 'reset' or Inband beacon (from remote EP)
++		 * toggling phy_powerdown has same effect as 'inband beacon'
++		 * So, toggle bit18 of GPR1, used as a workaround of errata
++		 * "PCIe PCIe does not support L2 Power Down"
++		 */
++		if (IS_ENABLED(CONFIG_PCI_IMX6)) {
++			g = syscon_regmap_lookup_by_compatible("fsl,imx6q-iomuxc-gpr");
++			if (IS_ERR(g)) {
++				pr_err("failed to find fsl,imx6q-iomux-gpr regmap\n");
++				return PTR_ERR(g);
++			}
++			regmap_update_bits(g, IOMUXC_GPR1, IMX6Q_GPR1_PCIE_TEST_PD,
++					IMX6Q_GPR1_PCIE_TEST_PD);
++		}
++
+ 		/* Zzz ... */
+ 		cpu_suspend(0, imx6q_suspend_finish);
+ 		if (cpu_is_imx6q() || cpu_is_imx6dl())
+ 			imx_smp_prepare();
++
++		/*
++		 * L2 can exit by 'reset' or Inband beacon (from remote EP)
++		 * toggling phy_powerdown has same effect as 'inband beacon'
++		 * So, toggle bit18 of GPR1, used as a workaround of errata
++		 * "PCIe PCIe does not support L2 Power Down"
++		 */
++		if (IS_ENABLED(CONFIG_PCI_IMX6)) {
++			regmap_update_bits(g, IOMUXC_GPR1, IMX6Q_GPR1_PCIE_TEST_PD,
++					!IMX6Q_GPR1_PCIE_TEST_PD);
++		}
++
+ 		imx_anatop_post_resume();
+ 		imx_gpc_post_resume();
+ 		imx6_enable_rbc(false);
+diff --git a/drivers/tty/serial/imx.c b/drivers/tty/serial/imx.c
+index dfeff3951f93..65aae9a39ef7 100644
+--- a/drivers/tty/serial/imx.c
++++ b/drivers/tty/serial/imx.c
+@@ -2287,13 +2287,13 @@ static int imx_serial_port_suspend_noirq(struct device *dev)
+ 	struct imx_port *sport = platform_get_drvdata(pdev);
+ 	int ret;
+ 
+-	ret = clk_enable(sport->clk_ipg);
++	ret = clk_prepare_enable(sport->clk_ipg);
+ 	if (ret)
+ 		return ret;
+ 
+ 	serial_imx_save_context(sport);
+ 
+-	clk_disable(sport->clk_ipg);
++	clk_disable_unprepare(sport->clk_ipg);
+ 
+ 	return 0;
+ }
+@@ -2304,13 +2304,13 @@ static int imx_serial_port_resume_noirq(struct device *dev)
+ 	struct imx_port *sport = platform_get_drvdata(pdev);
+ 	int ret;
+ 
+-	ret = clk_enable(sport->clk_ipg);
++	ret = clk_prepare_enable(sport->clk_ipg);
+ 	if (ret)
+ 		return ret;
+ 
+ 	serial_imx_restore_context(sport);
+ 
+-	clk_disable(sport->clk_ipg);
++	clk_disable_unprepare(sport->clk_ipg);
+ 
+ 	return 0;
+ }
+-- 
+2.15.1.424.g9478a66081
+
