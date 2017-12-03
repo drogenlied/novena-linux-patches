@@ -1,4 +1,4 @@
 # novena-linux-patches
 Linux Kernel patches for the Novena open Laptop.
 
-Based on work by @xobs and @sakaki-.
+Based on work by [@xobs](https://github.com/xobs/) and [@sakaki-](https://github.com/sakaki-).
